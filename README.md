@@ -1,4 +1,4 @@
-# hdl_localization_AutoInitialize
+# AutoInitialize
 本工作空间提供两种基于激光雷达点云的初始位姿估计方法，用于为 `hdl_localization` 等定位系统提供自动重定位初值。两种方法均采用 **离线建库 + 在线检索** 的架构，与 Faster-LIO 建图流程无缝集成。基于ScanContext和BTC描述子自动初始化Hdl重定位算法的初始位姿，不用在Rviz中通过2D Pose Estimate手动初始化
 
 ## 🎬 演示效果
