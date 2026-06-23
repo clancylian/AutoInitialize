@@ -10,13 +10,11 @@
 #include <mutex>
 #include <pcl/common/io.h>
 #include <pcl/kdtree/kdtree_flann.h>
-#include <ros/ros.h>
+#include <rclcpp/rclcpp.hpp>
 #include <sstream>
 #include <stdio.h>
 #include <string>
 #include <unordered_map>
-#include <visualization_msgs/Marker.h>
-#include <visualization_msgs/MarkerArray.h>
 
 #define HASH_P 116101
 #define MAX_N 10000000000
@@ -69,21 +67,15 @@ typedef struct BinaryDescriptor {
 } BinaryDescriptor;
 
 typedef struct BinaryDescriptorF {
-  // std::vector<bool> occupy_array_;
-  // bool occupy_array_[49];
   unsigned char summary_;
   Eigen::Vector3f location_;
 } BinaryDescriptorF;
 
-// 1kb,12.8
 typedef struct STD {
   Eigen::Vector3d triangle_;
   Eigen::Vector3d angle_;
   Eigen::Vector3d center_;
-  // unsigned short frame_number_;
   int frame_number_;
-  // std::vector<unsigned short> score_frame_;
-  // std::vector<Eigen::Matrix3d> position_list_;
   BinaryDescriptor binary_A_;
   BinaryDescriptor binary_B_;
   BinaryDescriptor binary_C_;
@@ -122,7 +114,6 @@ public:
   }
 };
 
-// Hash value
 namespace std {
 template <> struct hash<BTCVOXEL_LOC> {
   int64_t operator()(const BTCVOXEL_LOC &s) const {
@@ -143,8 +134,6 @@ public:
 
   bool operator==(const STD_LOC &other) const {
     return (x == other.x && y == other.y && z == other.z);
-    // return (x == other.x && y == other.y && z == other.z && a == other.a &&
-    //         b == other.b && c == other.c);
   }
 };
 
@@ -164,17 +153,16 @@ public:
   std::vector<Eigen::Vector3d> voxel_points_;
   BTCPlane *plane_ptr_;
   int layer_;
-  int octo_state_; // 0 is end of tree, 1 is not
+  int octo_state_;
   int merge_num_ = 0;
   bool is_project_ = false;
   std::vector<Eigen::Vector3d> project_normal;
   bool is_publish_ = false;
   BTCOctoTree *leaves_[8];
-  double voxel_center_[3]; // x, y, z
+  double voxel_center_[3];
   float quater_length_;
   bool init_octo_;
 
-  // for plot
   bool is_check_connect_[6];
   bool connect_[6];
   BTCOctoTree *connect_tree_[6];
@@ -188,7 +176,6 @@ public:
     for (int i = 0; i < 8; i++) {
       leaves_[i] = nullptr;
     }
-    // for plot
     for (int i = 0; i < 6; i++) {
       is_check_connect_[i] = false;
       connect_[i] = false;
@@ -215,10 +202,7 @@ double binary_similarity(const BinaryDescriptor &b1,
 bool binary_greater_sort(BinaryDescriptor a, BinaryDescriptor b);
 bool plane_greater_sort(BTCPlane *plane1, BTCPlane *plane2);
 
-// double
-// calc_triangle_dis(const std::vector<std::pair<STD, STD>> &match_std_list);
-
-void read_parameters(ros::NodeHandle &nh, ConfigSetting &config_setting, int isHighFly);
+void read_parameters(rclcpp::Node &nh, ConfigSetting &config_setting, int isHighFly);
 
 Eigen::Vector3d normal2vec(const pcl::PointXYZINormal &pi);
 
@@ -244,49 +228,30 @@ public:
     current_frame_id_ = 0;
   };
 
-  // std::vector<BinaryDescriptor> vec_binary;
-
-  // hash table, save all descriptors
   std::unordered_map<STD_LOC, std::vector<STD>> data_base_;
 
-  // save all key clouds, optional
-  // std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> key_cloud_vec_;
-
-  // save all binary descriptors of key frame
-  // std::vector<std::vector<BinaryDescriptor>> history_binary_list_;
-
-  // save all planes of key frame, required
   std::vector<pcl::PointCloud<pcl::PointXYZINormal>::Ptr> plane_cloud_vec_;
 
-  /*Three main processing functions*/
-
-  // generate STDescs from a point cloud
   void GenerateSTDescs(pcl::PointCloud<pcl::PointXYZI>::Ptr &input_cloud,
                        std::vector<STD> &stds_vec, int id);
 
-  // search result <candidate_id, plane icp score>. -1 for no loop
   void SearchLoop(std::vector<STD> &stds_vec,
                   std::pair<int, double> &loop_result,
                   std::pair<Eigen::Vector3d, Eigen::Matrix3d> &loop_transform,
                   std::vector<std::pair<STD, STD>> &loop_std_pair, pcl::PointCloud<pcl::PointXYZINormal>::Ptr pl_cur);
 
-  // add descriptors to database
   void AddSTDescs(const std::vector<STD> &stds_vec);
 
-  // Geometrical optimization by plane-to-plane ico
   void PlaneGeomrtricIcp(
       const pcl::PointCloud<pcl::PointXYZINormal>::Ptr &source_cloud,
       const pcl::PointCloud<pcl::PointXYZINormal>::Ptr &target_cloud,
       std::pair<Eigen::Vector3d, Eigen::Matrix3d> &transform);
 
 private:
-  /*Following are sub-processing functions*/
 
-  // voxelization and plane detection
   void init_voxel_map(const pcl::PointCloud<pcl::PointXYZI>::Ptr &input_cloud,
                       std::unordered_map<BTCVOXEL_LOC, BTCOctoTree *> &voxel_map);
 
-  // acquire planes from voxel_map
   void get_plane(const std::unordered_map<BTCVOXEL_LOC, BTCOctoTree *> &voxel_map,
                  pcl::PointCloud<pcl::PointXYZINormal>::Ptr &plane_cloud);
 
@@ -295,8 +260,6 @@ private:
 
   void merge_plane(std::vector<BTCPlane *> &origin_list,
                    std::vector<BTCPlane *> &merge_plane_list);
-
-  // extract corner points from pre-build voxel map and clouds
 
   void binary_extractor(const std::vector<BTCPlane *> proj_plane_list,
                         const pcl::PointCloud<pcl::PointXYZI>::Ptr &input_cloud,
@@ -307,29 +270,22 @@ private:
                       const pcl::PointCloud<pcl::PointXYZI>::Ptr &input_cloud,
                       std::vector<BinaryDescriptor> &binary_list);
 
-  // non maximum suppression, to control the number of corners
   void non_maxi_suppression(std::vector<BinaryDescriptor> &binary_list);
 
-  // build STDescs from corner points.
   void generate_std(const std::vector<BinaryDescriptor> &binary_list,
                     const int &frame_id, std::vector<STD> &std_list);
 
-  // Select a specified number of candidate frames according to the number of
-  // STDesc rough matches
   void candidate_selector(std::vector<STD> &stds_vec,
                           std::vector<STDMatchList> &candidate_matcher_vec);
 
-  // Get the best candidate frame by geometry check
   void
   candidate_verify(STDMatchList &candidate_matcher, double &verify_score,
                    std::pair<Eigen::Vector3d, Eigen::Matrix3d> &relative_pose,
                    std::vector<std::pair<STD, STD>> &sucess_match_vec, pcl::PointCloud<pcl::PointXYZINormal>::Ptr pl_cur);
 
-  // Get the transform between a matched std pair
   void triangle_solver(const std::pair<STD, STD> &std_pair, Eigen::Vector3d &t,
                        Eigen::Matrix3d &rot);
 
-  // Geometrical verification by plane-to-plane icp threshold
   double plane_geometric_verify(
       const pcl::PointCloud<pcl::PointXYZINormal>::Ptr &source_cloud,
       const pcl::PointCloud<pcl::PointXYZINormal>::Ptr &target_cloud,

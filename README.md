@@ -22,17 +22,26 @@
 ## 🛠 安装与编译
 
 ### 环境要求
-- ROS Noetic
+- **ROS Noetic** (Ubuntu 20.04) 或 **ROS Humble** (Ubuntu 22.04)
 - CMake ≥ 3.0.2
 - C++17 编译器
 - TBB (Intel Threading Building Blocks)
 
-### 编译步骤
+### ROS Noetic 编译步骤
 ```bash
 cd /your_workspace/src/hdl_localization_AutoInitialize
 catkin_make -DCMAKE_BUILD_TYPE=Release
 source devel/setup.bash
 ```
+
+### ROS Humble 编译步骤
+```bash
+cd /your_workspace/AutoInitialize
+colcon build --symlink-install
+source install/setup.bash
+```
+
+**注意**: ROS 2 版本已将项目从 Catkin 迁移到 Colcon/Ament，配置文件格式需要调整为 ROS 2 格式（见下文）。
 
 ## 🗺️ 与 Faster-LIO 建图集成
 
@@ -55,11 +64,30 @@ roslaunch btc_init_localizer btc_map_builder.launch
 - `/velodyne_points` (`sensor_msgs/PointCloud2`) - 原始激光雷达点云
 - `/Odometry` (`nav_msgs/Odometry`) - 来自 Faster-LIO 的 map 坐标系下位姿
 
+### ROS 2 配置文件格式
+ROS 2 使用 YAML 格式配置文件，需要添加节点名称和 `ros__parameters` 层级：
+```yaml
+# ROS 2 配置文件格式示例
+node_name:
+  ros__parameters:
+    cloud_topic: /velodyne_points
+    odom_topic: /Odometry
+    output_dir: /path/to/database
+    # ... 其他参数
+```
+
 ## 📁 离线建库
 
 ### Scan Context 建库
+
+**ROS 1:**
 ```bash
 roslaunch scancontext_init_localizer sc_map_builder.launch
+```
+
+**ROS 2:**
+```bash
+ros2 launch scancontext_init_localizer sc_map_builder.launch.py
 ```
 
 **输出目录结构** (`output_dir` 默认为 `scancontext_db`)：
@@ -70,8 +98,15 @@ clouds/*.pcd     # 历史关键帧点云
 ```
 
 ### BTC 描述子建库
+
+**ROS 1:**
 ```bash
 roslaunch btc_init_localizer btc_map_builder.launch
+```
+
+**ROS 2:**
+```bash
+ros2 launch btc_init_localizer btc_map_builder.launch.py
 ```
 
 **输出目录结构** (`output_dir` 默认为 `btc_db`)：
@@ -85,12 +120,23 @@ planes/*.pcd     # 历史平面点云（用于几何验证）
 ## 🔍 在线初始化服务
 
 ### Scan Context 初始化
+
+**ROS 1:**
 ```bash
 # 启动服务节点
 roslaunch scancontext_init_localizer sc_ndt_initializer.launch
 
 # 调用初始化服务
 rosservice call /scancontext_initialize
+```
+
+**ROS 2:**
+```bash
+# 启动服务节点
+ros2 launch scancontext_init_localizer sc_ndt_initializer.launch.py
+
+# 调用初始化服务
+ros2 service call /scancontext_initialize std_srvs/srv/Empty
 ```
 
 **处理流程**：
@@ -102,12 +148,23 @@ rosservice call /scancontext_initialize
 6. 发布到 `/initialpose` 话题
 
 ### BTC 描述子初始化
+
+**ROS 1:**
 ```bash
 # 启动服务节点
 roslaunch btc_init_localizer btc_ndt_initializer.launch
 
 # 调用初始化服务
 rosservice call /btc_initialize
+```
+
+**ROS 2:**
+```bash
+# 启动服务节点
+ros2 launch btc_init_localizer btc_ndt_initializer.launch.py
+
+# 调用初始化服务
+ros2 service call /btc_initialize std_srvs/srv/Empty
 ```
 
 **处理流程**：
@@ -211,6 +268,31 @@ ndt_num_threads: 4             # NDT 并行线程数
 
 ---
 
-**最后更新**: 2026年4月2日  
-**兼容系统**: ROS Noetic, Ubuntu 20.04  
+**最后更新**: 2026年6月23日  
+**兼容系统**: ROS Noetic (Ubuntu 20.04) / ROS Humble (Ubuntu 22.04)  
 **测试平台**: Faster-LIO + Velodyne 雷达
+
+## 🔄 ROS 1 到 ROS 2 迁移说明
+
+### 主要变更
+1. **构建系统**: Catkin → Colcon/Ament
+2. **API 变更**:
+   - `ros::NodeHandle` → `rclcpp::Node`
+   - `ros::Subscriber/Publisher/Service` → `rclcpp::Subscription/Publisher/Service`
+   - `ROS_INFO/WARN/ERROR` → `RCLCPP_INFO/WARN/ERROR`
+   - `ros::init/spin` → `rclcpp::init/spin`
+3. **配置文件**: 需要添加节点名称和 `ros__parameters` 层级
+4. **Launch 文件**: `.launch` → `.launch.py`
+
+### 迁移步骤
+```bash
+# 1. 编译项目
+colcon build --symlink-install
+
+# 2. 设置环境变量（如果日志目录不可写）
+export ROS_LOG_DIR=/path/to/writable/log/dir
+
+# 3. 启动节点
+source install/setup.bash
+ros2 launch <package_name> <launch_file>.launch.py
+```

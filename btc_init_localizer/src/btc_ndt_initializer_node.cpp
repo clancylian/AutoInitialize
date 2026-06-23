@@ -1,14 +1,13 @@
-#include "btc_init_localizer/EstimateInitialPose.h"
 #include "btc_init_localizer/BTC.h"
 #include "btc_init_localizer/btc_database.hpp"
 
 #include <boost/filesystem.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <pcl/io/pcd_io.h>
+#include <pcl/registration/ndt.h>
 #include <pcl_conversions/pcl_conversions.h>
-#include <pclomp/ndt_omp.h>
-#include <ros/ros.h>
-#include <ros/topic.h>
-#include <sensor_msgs/PointCloud2.h>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 
 #include <Eigen/Geometry>
 
@@ -21,33 +20,49 @@
 
 namespace bil = btc_init_localizer;
 
-class BTCNDTInitializer {
+class BTCNDTInitializer : public rclcpp::Node {
 public:
-  BTCNDTInitializer() : nh_(), pnh_("~") {
-    pnh_.param<std::string>("db_dir", db_dir_, "/tmp/btc_db");
-    pnh_.param<std::string>("lidar_topic", lidar_topic_, "/velodyne_points");
-    pnh_.param<std::string>("map_frame", map_frame_, "map");
-    pnh_.param<std::string>("initialpose_topic", initialpose_topic_, "/initialpose");
-    pnh_.param<double>("service_wait_cloud_sec", wait_cloud_sec_, 1.0);
-    pnh_.param<double>("btc_score_threshold", btc_score_threshold_, 0.15);
-    pnh_.param<int>("is_high_fly", is_high_fly_, 0);
+  BTCNDTInitializer() : Node("btc_ndt_initializer_node") {
+    this->declare_parameter<std::string>("db_dir", "/tmp/btc_db");
+    this->declare_parameter<std::string>("lidar_topic", "/velodyne_points");
+    this->declare_parameter<std::string>("map_frame", "map");
+    this->declare_parameter<std::string>("initialpose_topic", "/initialpose");
+    this->declare_parameter<double>("service_wait_cloud_sec", 1.0);
+    this->declare_parameter<double>("btc_score_threshold", 0.15);
+    this->declare_parameter<int>("is_high_fly", 0);
 
-    pnh_.param<double>("ndt_resolution", ndt_resolution_, 1.0);
-    pnh_.param<double>("ndt_step_size", ndt_step_size_, 0.1);
-    pnh_.param<double>("ndt_trans_eps", ndt_trans_eps_, 0.01);
-    pnh_.param<int>("ndt_max_iter", ndt_max_iter_, 40);
-    pnh_.param<int>("ndt_num_threads", ndt_num_threads_, 4);
-    pnh_.param<int>("ndt_neighborhood", ndt_neighborhood_, 2);
+    this->declare_parameter<double>("ndt_resolution", 1.0);
+    this->declare_parameter<double>("ndt_step_size", 0.1);
+    this->declare_parameter<double>("ndt_trans_eps", 0.01);
+    this->declare_parameter<int>("ndt_max_iter", 40);
+    this->declare_parameter<int>("ndt_num_threads", 4);
+    this->declare_parameter<int>("ndt_neighborhood", 2);
 
-    read_parameters(pnh_, config_setting_, is_high_fly_);
-    pnh_.param<int>("skip_near_num", config_setting_.skip_near_num_, -1);
+    this->get_parameter("db_dir", db_dir_);
+    this->get_parameter("lidar_topic", lidar_topic_);
+    this->get_parameter("map_frame", map_frame_);
+    this->get_parameter("initialpose_topic", initialpose_topic_);
+    this->get_parameter("service_wait_cloud_sec", wait_cloud_sec_);
+    this->get_parameter("btc_score_threshold", btc_score_threshold_);
+    this->get_parameter("is_high_fly", is_high_fly_);
+
+    this->get_parameter("ndt_resolution", ndt_resolution_);
+    this->get_parameter("ndt_step_size", ndt_step_size_);
+    this->get_parameter("ndt_trans_eps", ndt_trans_eps_);
+    this->get_parameter("ndt_max_iter", ndt_max_iter_);
+    this->get_parameter("ndt_num_threads", ndt_num_threads_);
+    this->get_parameter("ndt_neighborhood", ndt_neighborhood_);
+
+    read_parameters(*this, config_setting_, is_high_fly_);
+    this->declare_parameter<int>("skip_near_num", -1);
+    this->get_parameter("skip_near_num", config_setting_.skip_near_num_);
     config_setting_.icp_threshold_ = static_cast<float>(btc_score_threshold_);
 
     std::vector<bil::DatabaseEntry> loaded_entries;
     std::string error;
     if (!bil::loadDatabase(db_dir_, &loaded_entries, &error)) {
-      ROS_FATAL_STREAM("Failed to load BTC database: " << error << " db_dir=" << db_dir_);
-      ros::shutdown();
+      RCLCPP_FATAL_STREAM(this->get_logger(), "Failed to load BTC database: " << error << " db_dir=" << db_dir_);
+      rclcpp::shutdown();
       return;
     }
 
@@ -70,36 +85,36 @@ public:
     }
 
     if (entries_.empty()) {
-      ROS_FATAL_STREAM("BTC database is empty after filtering. db_dir=" << db_dir_);
-      ros::shutdown();
+      RCLCPP_FATAL_STREAM(this->get_logger(), "BTC database is empty after filtering. db_dir=" << db_dir_);
+      rclcpp::shutdown();
       return;
     }
 
-    initialpose_pub_ = nh_.advertise<geometry_msgs::PoseWithCovarianceStamped>(initialpose_topic_, 1, true);
-    service_ = nh_.advertiseService("btc_initialize", &BTCNDTInitializer::serviceCallback, this);
+    initialpose_pub_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(initialpose_topic_, 1);
+    
+    cloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+        lidar_topic_, 10, std::bind(&BTCNDTInitializer::cloudCallback, this, std::placeholders::_1));
 
-    ROS_INFO_STREAM("btc_ndt_initializer ready: entries=" << entries_.size() << " service=/btc_initialize");
+    RCLCPP_INFO_STREAM(this->get_logger(), "btc_ndt_initializer ready: entries=" << entries_.size());
   }
 
 private:
-  bool serviceCallback(btc_init_localizer::EstimateInitialPose::Request& req,
-                       btc_init_localizer::EstimateInitialPose::Response& res) {
-    (void)req;
+  void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg) {
+    latest_cloud_ = cloud_msg;
+    performInitialization();
+  }
 
-    const auto cloud_msg = ros::topic::waitForMessage<sensor_msgs::PointCloud2>(
-        lidar_topic_, nh_, ros::Duration(wait_cloud_sec_));
-    if (!cloud_msg) {
-      res.success = false;
-      res.message = "timeout waiting lidar topic";
-      return true;
+  bool performInitialization() {
+    if (!latest_cloud_) {
+      RCLCPP_WARN(this->get_logger(), "No cloud received yet");
+      return false;
     }
 
     pcl::PointCloud<pcl::PointXYZI>::Ptr source_cloud(new pcl::PointCloud<pcl::PointXYZI>());
-    pcl::fromROSMsg(*cloud_msg, *source_cloud);
+    pcl::fromROSMsg(*latest_cloud_, *source_cloud);
     if (source_cloud->empty()) {
-      res.success = false;
-      res.message = "empty lidar cloud";
-      return true;
+      RCLCPP_WARN(this->get_logger(), "Empty lidar cloud");
+      return false;
     }
 
     std::vector<STD> query_stds;
@@ -110,9 +125,8 @@ private:
       if (!desc_manager_->plane_cloud_vec_.empty()) {
         desc_manager_->plane_cloud_vec_.pop_back();
       }
-      res.success = false;
-      res.message = "failed to generate BTC descriptors";
-      return true;
+      RCLCPP_WARN(this->get_logger(), "Failed to generate BTC descriptors");
+      return false;
     }
 
     auto query_plane_cloud = desc_manager_->plane_cloud_vec_.back();
@@ -122,23 +136,16 @@ private:
     std::vector<std::pair<STD, STD>> loop_std_pair;
     desc_manager_->SearchLoop(query_stds, loop_result, loop_transform, loop_std_pair, query_plane_cloud);
 
-    // Remove transient current-frame plane cloud, keep offline DB planes intact.
     desc_manager_->plane_cloud_vec_.pop_back();
 
     if (loop_result.first < 0 || loop_result.first >= static_cast<int>(entries_.size())) {
-      res.success = false;
-      res.message = "BTC matching failed";
-      res.btc_score = static_cast<float>(loop_result.second);
-      res.matched_index = -1;
-      return true;
+      RCLCPP_WARN(this->get_logger(), "BTC matching failed");
+      return false;
     }
 
     if (loop_result.second < btc_score_threshold_) {
-      res.success = false;
-      res.message = "BTC score below threshold";
-      res.btc_score = static_cast<float>(loop_result.second);
-      res.matched_index = entries_[loop_result.first].index;
-      return true;
+      RCLCPP_WARN_STREAM(this->get_logger(), "BTC score below threshold: " << loop_result.second);
+      return false;
     }
 
     const auto& matched = entries_[loop_result.first];
@@ -149,11 +156,8 @@ private:
       target_path = (boost::filesystem::path(db_dir_) / target_path).string();
     }
     if (pcl::io::loadPCDFile(target_path, *target_cloud) != 0 || target_cloud->empty()) {
-      res.success = false;
-      res.message = "failed to load matched target pcd";
-      res.btc_score = static_cast<float>(loop_result.second);
-      res.matched_index = matched.index;
-      return true;
+      RCLCPP_ERROR(this->get_logger(), "Failed to load matched target pcd");
+      return false;
     }
 
     Eigen::Matrix4f init_guess = Eigen::Matrix4f::Identity();
@@ -162,22 +166,11 @@ private:
     init_guess(1, 3) = static_cast<float>(loop_transform.first.y());
     init_guess(2, 3) = static_cast<float>(loop_transform.first.z());
 
-    pclomp::NormalDistributionsTransform<pcl::PointXYZI, pcl::PointXYZI> ndt;
+    pcl::NormalDistributionsTransform<pcl::PointXYZI, pcl::PointXYZI> ndt;
     ndt.setResolution(ndt_resolution_);
     ndt.setStepSize(ndt_step_size_);
     ndt.setTransformationEpsilon(ndt_trans_eps_);
     ndt.setMaximumIterations(ndt_max_iter_);
-    ndt.setNumThreads(ndt_num_threads_);
-
-    if (ndt_neighborhood_ == 0) {
-      ndt.setNeighborhoodSearchMethod(pclomp::KDTREE);
-    } else if (ndt_neighborhood_ == 1) {
-      ndt.setNeighborhoodSearchMethod(pclomp::DIRECT26);
-    } else if (ndt_neighborhood_ == 3) {
-      ndt.setNeighborhoodSearchMethod(pclomp::DIRECT1);
-    } else {
-      ndt.setNeighborhoodSearchMethod(pclomp::DIRECT7);
-    }
 
     ndt.setInputTarget(target_cloud);
     ndt.setInputSource(source_cloud);
@@ -186,11 +179,8 @@ private:
     ndt.align(aligned, init_guess);
 
     if (!ndt.hasConverged()) {
-      res.success = false;
-      res.message = "NDT did not converge";
-      res.btc_score = static_cast<float>(loop_result.second);
-      res.matched_index = matched.index;
-      return true;
+      RCLCPP_WARN(this->get_logger(), "NDT did not converge");
+      return false;
     }
 
     const Eigen::Matrix4f tf_historical_current = ndt.getFinalTransformation();
@@ -200,8 +190,8 @@ private:
     Eigen::Quaternionf q(tf_map_current.block<3, 3>(0, 0));
     q.normalize();
 
-    geometry_msgs::PoseWithCovarianceStamped pose_msg;
-    pose_msg.header.stamp = ros::Time::now();
+    geometry_msgs::msg::PoseWithCovarianceStamped pose_msg;
+    pose_msg.header.stamp = this->now();
     pose_msg.header.frame_id = map_frame_;
     pose_msg.pose.pose.position.x = tf_map_current(0, 3);
     pose_msg.pose.pose.position.y = tf_map_current(1, 3);
@@ -211,22 +201,14 @@ private:
     pose_msg.pose.pose.orientation.z = q.z();
     pose_msg.pose.pose.orientation.w = q.w();
 
-    for (double& c : pose_msg.pose.covariance) {
-      c = 0.0;
-    }
+    std::fill(pose_msg.pose.covariance.begin(), pose_msg.pose.covariance.end(), 0.0);
     pose_msg.pose.covariance[0] = 0.25;
     pose_msg.pose.covariance[7] = 0.25;
     pose_msg.pose.covariance[35] = 0.2;
 
-    initialpose_pub_.publish(pose_msg);
+    initialpose_pub_->publish(pose_msg);
 
-    res.success = true;
-    res.message = "success";
-    res.initial_pose = pose_msg;
-    res.btc_score = static_cast<float>(loop_result.second);
-    res.matched_index = matched.index;
-
-    ROS_INFO_STREAM("Init pose published. idx=" << matched.index
+    RCLCPP_INFO_STREAM(this->get_logger(), "Init pose published. idx=" << matched.index
                     << " btc_score=" << loop_result.second
                     << " ndt_fitness=" << ndt.getFitnessScore());
     return true;
@@ -247,13 +229,12 @@ private:
     return m;
   }
 
-  ros::NodeHandle nh_;
-  ros::NodeHandle pnh_;
-  ros::Publisher initialpose_pub_;
-  ros::ServiceServer service_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initialpose_pub_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
 
   std::unique_ptr<STDescManager> desc_manager_;
   std::vector<bil::DatabaseEntry> entries_;
+  sensor_msgs::msg::PointCloud2::SharedPtr latest_cloud_;
 
   std::string db_dir_;
   std::string lidar_topic_;
@@ -275,8 +256,8 @@ private:
 };
 
 int main(int argc, char** argv) {
-  ros::init(argc, argv, "btc_ndt_initializer_node");
-  BTCNDTInitializer node;
-  ros::spin();
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<BTCNDTInitializer>());
+  rclcpp::shutdown();
   return 0;
 }

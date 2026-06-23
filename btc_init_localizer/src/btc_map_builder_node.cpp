@@ -6,11 +6,11 @@
 #include <message_filters/subscriber.h>
 #include <message_filters/sync_policies/approximate_time.h>
 #include <message_filters/synchronizer.h>
-#include <nav_msgs/Odometry.h>
+#include <nav_msgs/msg/odometry.hpp>
 #include <pcl/io/pcd_io.h>
 #include <pcl_conversions/pcl_conversions.h>
-#include <ros/ros.h>
-#include <sensor_msgs/PointCloud2.h>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 
 #include <fstream>
 #include <iomanip>
@@ -19,18 +19,26 @@
 
 namespace bil = btc_init_localizer;
 
-class BTCMapBuilder {
+class BTCMapBuilder : public rclcpp::Node {
 public:
-  BTCMapBuilder() : nh_(), pnh_("~") {
-    pnh_.param<std::string>("cloud_topic", cloud_topic_, "/velodyne_points");
-    pnh_.param<std::string>("odom_topic", odom_topic_, "/Odometry");
-    pnh_.param<std::string>("output_dir", output_dir_, "/tmp/btc_db");
-    pnh_.param<std::string>("map_frame", map_frame_, "map");
-    pnh_.param<int>("save_every_n", save_every_n_, 3);
-    pnh_.param<int>("sync_queue_size", sync_queue_size_, 20);
-    pnh_.param<int>("is_high_fly", is_high_fly_, 0);
+  BTCMapBuilder() : Node("btc_map_builder_node") {
+    this->declare_parameter<std::string>("cloud_topic", "/velodyne_points");
+    this->declare_parameter<std::string>("odom_topic", "/Odometry");
+    this->declare_parameter<std::string>("output_dir", "/tmp/btc_db");
+    this->declare_parameter<std::string>("map_frame", "map");
+    this->declare_parameter<int>("save_every_n", 3);
+    this->declare_parameter<int>("sync_queue_size", 20);
+    this->declare_parameter<int>("is_high_fly", 0);
 
-    read_parameters(pnh_, config_setting_, is_high_fly_);
+    this->get_parameter("cloud_topic", cloud_topic_);
+    this->get_parameter("odom_topic", odom_topic_);
+    this->get_parameter("output_dir", output_dir_);
+    this->get_parameter("map_frame", map_frame_);
+    this->get_parameter("save_every_n", save_every_n_);
+    this->get_parameter("sync_queue_size", sync_queue_size_);
+    this->get_parameter("is_high_fly", is_high_fly_);
+
+    read_parameters(*this, config_setting_, is_high_fly_);
 
     boost::filesystem::create_directories(boost::filesystem::path(output_dir_) / "clouds");
     boost::filesystem::create_directories(boost::filesystem::path(output_dir_) / "planes");
@@ -38,12 +46,12 @@ public:
 
     saved_count_ = countExistingEntries();
 
-    cloud_sub_.subscribe(nh_, cloud_topic_, 20);
-    odom_sub_.subscribe(nh_, odom_topic_, 200);
+    cloud_sub_.subscribe(this, cloud_topic_, rmw_qos_profile_sensor_data);
+    odom_sub_.subscribe(this, odom_topic_, rmw_qos_profile_sensor_data);
     sync_.reset(new Sync(SyncPolicy(sync_queue_size_), cloud_sub_, odom_sub_));
-    sync_->registerCallback(boost::bind(&BTCMapBuilder::syncCallback, this, _1, _2));
+    sync_->registerCallback(std::bind(&BTCMapBuilder::syncCallback, this, std::placeholders::_1, std::placeholders::_2));
 
-    ROS_INFO_STREAM("btc_map_builder ready. cloud_topic=" << cloud_topic_
+    RCLCPP_INFO_STREAM(this->get_logger(), "btc_map_builder ready. cloud_topic=" << cloud_topic_
                     << " odom_topic=" << odom_topic_
                     << " output_dir=" << output_dir_);
   }
@@ -66,8 +74,8 @@ private:
     return count;
   }
 
-  void syncCallback(const sensor_msgs::PointCloud2ConstPtr& cloud_msg,
-                    const nav_msgs::OdometryConstPtr& odom_msg) {
+  void syncCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& cloud_msg,
+                    const nav_msgs::msg::Odometry::ConstSharedPtr& odom_msg) {
     ++recv_count_;
     if (save_every_n_ > 1 && (recv_count_ % save_every_n_) != 0) {
       return;
@@ -86,7 +94,7 @@ private:
     desc_manager.GenerateSTDescs(cloud, stds, saved_count_);
     if (stds.empty() || desc_manager.plane_cloud_vec_.empty() || !desc_manager.plane_cloud_vec_.back() ||
         desc_manager.plane_cloud_vec_.back()->empty()) {
-      ROS_WARN_STREAM_THROTTLE(1.0, "Skip frame due to empty BTC descriptors or empty plane cloud");
+      RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Skip frame due to empty BTC descriptors or empty plane cloud");
       return;
     }
 
@@ -102,7 +110,7 @@ private:
     entry.orientation.normalize();
 
     if (!map_frame_.empty() && !odom_msg->header.frame_id.empty() && odom_msg->header.frame_id != map_frame_) {
-      ROS_WARN_STREAM_THROTTLE(2.0, "Odometry frame_id is " << odom_msg->header.frame_id
+      RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Odometry frame_id is " << odom_msg->header.frame_id
                                << ", expected " << map_frame_);
     }
 
@@ -121,34 +129,31 @@ private:
 
     const std::string abs_pcd = (boost::filesystem::path(output_dir_) / entry.pcd_path).string();
     if (pcl::io::savePCDFileBinaryCompressed(abs_pcd, *cloud) != 0) {
-      ROS_ERROR_STREAM("Failed to save pcd: " << abs_pcd);
+      RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to save pcd: " << abs_pcd);
       return;
     }
 
     const std::string abs_plane = (boost::filesystem::path(output_dir_) / entry.plane_path).string();
     if (pcl::io::savePCDFileBinaryCompressed(abs_plane, *desc_manager.plane_cloud_vec_.back()) != 0) {
-      ROS_ERROR_STREAM("Failed to save plane cloud: " << abs_plane);
+      RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to save plane cloud: " << abs_plane);
       return;
     }
 
     if (!bil::saveDatabaseEntry(output_dir_, entry)) {
-      ROS_ERROR("Failed to save BTC database entry");
+      RCLCPP_ERROR(this->get_logger(), "Failed to save BTC database entry");
       return;
     }
 
     ++saved_count_;
-    ROS_INFO_STREAM_THROTTLE(0.5, "Saved BTC entry count=" << saved_count_ << " std_count=" << entry.stds.size());
+    RCLCPP_INFO_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 500, "Saved BTC entry count=" << saved_count_ << " std_count=" << entry.stds.size());
   }
 
 private:
-  using SyncPolicy = message_filters::sync_policies::ApproximateTime<sensor_msgs::PointCloud2, nav_msgs::Odometry>;
+  using SyncPolicy = message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::PointCloud2, nav_msgs::msg::Odometry>;
   using Sync = message_filters::Synchronizer<SyncPolicy>;
 
-  ros::NodeHandle nh_;
-  ros::NodeHandle pnh_;
-
-  message_filters::Subscriber<sensor_msgs::PointCloud2> cloud_sub_;
-  message_filters::Subscriber<nav_msgs::Odometry> odom_sub_;
+  message_filters::Subscriber<sensor_msgs::msg::PointCloud2> cloud_sub_;
+  message_filters::Subscriber<nav_msgs::msg::Odometry> odom_sub_;
   std::shared_ptr<Sync> sync_;
 
   std::string cloud_topic_;
@@ -166,8 +171,8 @@ private:
 };
 
 int main(int argc, char** argv) {
-  ros::init(argc, argv, "btc_map_builder_node");
-  BTCMapBuilder node;
-  ros::spin();
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<BTCMapBuilder>());
+  rclcpp::shutdown();
   return 0;
 }
