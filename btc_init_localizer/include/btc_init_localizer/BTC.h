@@ -49,7 +49,7 @@ typedef struct ConfigSetting {
   int skip_near_num_ = 20;
   int candidate_num_ = 50;
   float rough_dis_threshold_ = 0.03;
-  float similarity_threshold_ = 0.7;
+  float similarity_threshold_ = 0.85;
   float icp_threshold_ = 0.5;
   float normal_threshold_ = 0.1;
   float dis_threshold_ = 0.3;

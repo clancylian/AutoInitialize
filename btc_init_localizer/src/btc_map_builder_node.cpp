@@ -11,7 +11,11 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <tf2/exceptions.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 
+#include <Eigen/Geometry>
 #include <fstream>
 #include <iomanip>
 #include <memory>
@@ -50,6 +54,9 @@ public:
     odom_sub_.subscribe(this, odom_topic_, rmw_qos_profile_sensor_data);
     sync_.reset(new Sync(SyncPolicy(sync_queue_size_), cloud_sub_, odom_sub_));
     sync_->registerCallback(std::bind(&BTCMapBuilder::syncCallback, this, std::placeholders::_1, std::placeholders::_2));
+
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
     RCLCPP_INFO_STREAM(this->get_logger(), "btc_map_builder ready. cloud_topic=" << cloud_topic_
                     << " odom_topic=" << odom_topic_
@@ -98,20 +105,42 @@ private:
       return;
     }
 
+    // 获取 world 到 map 的变换
+    Eigen::Matrix4d tf_world_to_map = Eigen::Matrix4d::Identity();
+    bool transform_ok = getWorldToMapTransform(tf_world_to_map);
+
+    // 从 odom 消息中提取位姿（在 world 坐标系下）
+    Eigen::Matrix4d tf_world_odom = Eigen::Matrix4d::Identity();
+    tf_world_odom(0, 3) = odom_msg->pose.pose.position.x;
+    tf_world_odom(1, 3) = odom_msg->pose.pose.position.y;
+    tf_world_odom(2, 3) = odom_msg->pose.pose.position.z;
+    
+    Eigen::Quaterniond q_world(
+        odom_msg->pose.pose.orientation.w,
+        odom_msg->pose.pose.orientation.x,
+        odom_msg->pose.pose.orientation.y,
+        odom_msg->pose.pose.orientation.z);
+    tf_world_odom.block<3, 3>(0, 0) = q_world.toRotationMatrix();
+
+    // 将 world 坐标系下的位姿转换到 map 坐标系
+    // T_map = T_world_to_map × T_world
+    Eigen::Matrix4d tf_map_odom = tf_world_to_map * tf_world_odom;
+
     bil::DatabaseEntry entry;
     entry.index = saved_count_;
-    entry.position = Eigen::Vector3d(odom_msg->pose.pose.position.x,
-                                     odom_msg->pose.pose.position.y,
-                                     odom_msg->pose.pose.position.z);
-    entry.orientation = Eigen::Quaterniond(odom_msg->pose.pose.orientation.w,
-                                           odom_msg->pose.pose.orientation.x,
-                                           odom_msg->pose.pose.orientation.y,
-                                           odom_msg->pose.pose.orientation.z);
-    entry.orientation.normalize();
+    entry.position = Eigen::Vector3d(tf_map_odom(0, 3), tf_map_odom(1, 3), tf_map_odom(2, 3));
+    
+    Eigen::Quaterniond q_map(tf_map_odom.block<3, 3>(0, 0));
+    q_map.normalize();
+    entry.orientation = q_map;
+
+    RCLCPP_INFO_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
+        "World->Map transform: trans=[" << tf_world_to_map(0, 3) << ", " << tf_world_to_map(1, 3) << ", " << tf_world_to_map(2, 3) << "]"
+        << " transform_ok=" << std::boolalpha << transform_ok);
 
     if (!map_frame_.empty() && !odom_msg->header.frame_id.empty() && odom_msg->header.frame_id != map_frame_) {
       RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Odometry frame_id is " << odom_msg->header.frame_id
-                               << ", expected " << map_frame_);
+                               << ", expected " << map_frame_ << " (storing in map frame after transformation)");
     }
 
     std::ostringstream pcd_name;
@@ -145,7 +174,38 @@ private:
     }
 
     ++saved_count_;
-    RCLCPP_INFO_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 500, "Saved BTC entry count=" << saved_count_ << " std_count=" << entry.stds.size());
+    RCLCPP_INFO_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 500, "Saved BTC entry count=" << saved_count_ << " std_count=" << entry.stds.size()
+                            << " position=[" << entry.position.x() << ", " << entry.position.y() << ", " << entry.position.z() << "]"
+                            << " orientation=[" << entry.orientation.x() << ", " << entry.orientation.y() << ", " 
+                            << entry.orientation.z() << ", " << entry.orientation.w() << "]"
+                            << " frame_id=" << odom_msg->header.frame_id);
+  }
+
+  bool getWorldToMapTransform(Eigen::Matrix4d& tf_world_to_map) {
+    geometry_msgs::msg::TransformStamped transform_stamped;
+    try {
+      transform_stamped = tf_buffer_->lookupTransform(
+          "rkbot/map", "rkbot/world",
+          tf2::TimePointZero);
+    } catch (tf2::TransformException& ex) {
+      RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "Could not get transform from rkbot/world to rkbot/map: " << ex.what());
+      return false;
+    }
+
+    tf_world_to_map = Eigen::Matrix4d::Identity();
+    tf_world_to_map(0, 3) = transform_stamped.transform.translation.x;
+    tf_world_to_map(1, 3) = transform_stamped.transform.translation.y;
+    tf_world_to_map(2, 3) = transform_stamped.transform.translation.z;
+
+    Eigen::Quaterniond q(
+        transform_stamped.transform.rotation.w,
+        transform_stamped.transform.rotation.x,
+        transform_stamped.transform.rotation.y,
+        transform_stamped.transform.rotation.z);
+    q.normalize();
+    tf_world_to_map.block<3, 3>(0, 0) = q.toRotationMatrix();
+
+    return true;
   }
 
 private:
@@ -155,6 +215,9 @@ private:
   message_filters::Subscriber<sensor_msgs::msg::PointCloud2> cloud_sub_;
   message_filters::Subscriber<nav_msgs::msg::Odometry> odom_sub_;
   std::shared_ptr<Sync> sync_;
+
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
   std::string cloud_topic_;
   std::string odom_topic_;

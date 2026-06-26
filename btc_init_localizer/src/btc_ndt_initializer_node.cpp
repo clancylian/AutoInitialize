@@ -8,6 +8,9 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <tf2/exceptions.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 
 #include <Eigen/Geometry>
 
@@ -91,9 +94,15 @@ public:
     }
 
     initialpose_pub_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(initialpose_topic_, 1);
-    
+
+    // 使用 BEST_EFFORT QoS 以兼容发布者
+    rclcpp::QoS qos(10);
+    qos.reliability(RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT);
     cloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-        lidar_topic_, 10, std::bind(&BTCNDTInitializer::cloudCallback, this, std::placeholders::_1));
+        lidar_topic_, qos, std::bind(&BTCNDTInitializer::cloudCallback, this, std::placeholders::_1));
+
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
     RCLCPP_INFO_STREAM(this->get_logger(), "btc_ndt_initializer ready: entries=" << entries_.size());
   }
@@ -187,15 +196,33 @@ private:
     const Eigen::Matrix4f tf_map_historical = composePoseMatrix(matched.position, matched.orientation);
     const Eigen::Matrix4f tf_map_current = tf_map_historical * tf_historical_current;
 
-    Eigen::Quaternionf q(tf_map_current.block<3, 3>(0, 0));
+    // 动态获取 world 到 map 的变换
+    Eigen::Matrix4f tf_world_to_map = Eigen::Matrix4f::Identity();
+    if (!getWorldToMapTransform(tf_world_to_map)) {
+      RCLCPP_WARN(this->get_logger(), "Using identity transform from world to map");
+    }
+
+    // 将 world 坐标系下的位姿转换到 map 坐标系
+    // T_map = T_world_to_map × T_world
+    //Eigen::Matrix4f tf_map_from_world = tf_world_to_map * tf_map_current;
+    Eigen::Matrix4f tf_map_from_world = tf_map_current;
+
+    RCLCPP_INFO_STREAM(this->get_logger(), "World coordinate: [" << tf_map_current(0, 3)
+                    << ", " << tf_map_current(1, 3) << ", " << tf_map_current(2, 3) << "]");
+    RCLCPP_INFO_STREAM(this->get_logger(), "Map coordinate: [" << tf_map_from_world(0, 3)
+                    << ", " << tf_map_from_world(1, 3) << ", " << tf_map_from_world(2, 3) << "]");
+
+    // 使用转换后的 map 坐标系位姿
+    Eigen::Quaternionf q(tf_map_from_world.block<3, 3>(0, 0));
     q.normalize();
 
     geometry_msgs::msg::PoseWithCovarianceStamped pose_msg;
     pose_msg.header.stamp = this->now();
     pose_msg.header.frame_id = map_frame_;
-    pose_msg.pose.pose.position.x = tf_map_current(0, 3);
-    pose_msg.pose.pose.position.y = tf_map_current(1, 3);
-    pose_msg.pose.pose.position.z = tf_map_current(2, 3);
+    // 使用 world->map 转换后的坐标
+    pose_msg.pose.pose.position.x = tf_map_from_world(0, 3);
+    pose_msg.pose.pose.position.y = tf_map_from_world(1, 3);
+    pose_msg.pose.pose.position.z = tf_map_from_world(2, 3);
     pose_msg.pose.pose.orientation.x = q.x();
     pose_msg.pose.pose.orientation.y = q.y();
     pose_msg.pose.pose.orientation.z = q.z();
@@ -211,6 +238,20 @@ private:
     RCLCPP_INFO_STREAM(this->get_logger(), "Init pose published. idx=" << matched.index
                     << " btc_score=" << loop_result.second
                     << " ndt_fitness=" << ndt.getFitnessScore());
+
+    RCLCPP_INFO_STREAM(this->get_logger(), "pose_msg: header.frame_id=" << pose_msg.header.frame_id
+                    << " stamp=" << pose_msg.header.stamp.sec << "." << pose_msg.header.stamp.nanosec);
+    RCLCPP_INFO_STREAM(this->get_logger(), "  position: x=" << pose_msg.pose.pose.position.x
+                    << " y=" << pose_msg.pose.pose.position.y
+                    << " z=" << pose_msg.pose.pose.position.z);
+    RCLCPP_INFO_STREAM(this->get_logger(), "  orientation: x=" << pose_msg.pose.pose.orientation.x
+                    << " y=" << pose_msg.pose.pose.orientation.y
+                    << " z=" << pose_msg.pose.pose.orientation.z
+                    << " w=" << pose_msg.pose.pose.orientation.w);
+    RCLCPP_INFO_STREAM(this->get_logger(), "  covariance[0]=" << pose_msg.pose.covariance[0]
+                    << " covariance[7]=" << pose_msg.pose.covariance[7]
+                    << " covariance[35]=" << pose_msg.pose.covariance[35]);
+
     return true;
   }
 
@@ -229,8 +270,40 @@ private:
     return m;
   }
 
+  bool getWorldToMapTransform(Eigen::Matrix4f& tf_world_to_map) {
+    geometry_msgs::msg::TransformStamped transform_stamped;
+    try {
+      transform_stamped = tf_buffer_->lookupTransform(
+          "rkbot/map", "rkbot/world",
+          tf2::TimePointZero);
+    } catch (tf2::TransformException& ex) {
+      RCLCPP_WARN_STREAM(this->get_logger(), "Could not get transform from rkbot/world to rkbot/map: " << ex.what());
+      return false;
+    }
+
+    tf_world_to_map = Eigen::Matrix4f::Identity();
+    tf_world_to_map(0, 3) = transform_stamped.transform.translation.x;
+    tf_world_to_map(1, 3) = transform_stamped.transform.translation.y;
+    tf_world_to_map(2, 3) = transform_stamped.transform.translation.z;
+
+    Eigen::Quaternionf q(
+        transform_stamped.transform.rotation.w,
+        transform_stamped.transform.rotation.x,
+        transform_stamped.transform.rotation.y,
+        transform_stamped.transform.rotation.z);
+    q.normalize();
+    tf_world_to_map.block<3, 3>(0, 0) = q.toRotationMatrix();
+
+    RCLCPP_INFO_STREAM(this->get_logger(), "Dynamic transform world->map: trans=[" 
+                    << tf_world_to_map(0, 3) << ", " << tf_world_to_map(1, 3) 
+                    << ", " << tf_world_to_map(2, 3) << "]");
+    return true;
+  }
+
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initialpose_pub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
   std::unique_ptr<STDescManager> desc_manager_;
   std::vector<bil::DatabaseEntry> entries_;

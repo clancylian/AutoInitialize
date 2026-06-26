@@ -1,8 +1,8 @@
 btc_ndt_initializer:
   ros__parameters:
     db_dir: /home/lgl/Documents/trae_projects/autoinitialpose/AutoInitialize/btc_db
-    lidar_topic: /rkbot/lio/cloud_world
-    map_frame: rkbot/world
+    lidar_topic: /rkbot/lio/body/cloud
+    map_frame: rkbot/map
     initialpose_topic: /initialpose
     service_wait_cloud_sec: 1.0
     btc_score_threshold: 0.15
@@ -10,9 +10,9 @@ btc_ndt_initializer:
     skip_near_num: -1
     parallel_stl_enable: 1
     parallel_stl_min_size: 256
-    ndt_resolution: 1.0
+    ndt_resolution: 0.5
     ndt_step_size: 0.1
-    ndt_trans_eps: 0.01
-    ndt_max_iter: 40
+    ndt_trans_eps: 0.001
+    ndt_max_iter: 50
     ndt_num_threads: 4
     ndt_neighborhood: 2

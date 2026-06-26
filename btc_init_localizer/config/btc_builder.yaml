@@ -1,10 +1,11 @@
 btc_map_builder:
   ros__parameters:
-    cloud_topic: /rkbot/lio/cloud_world
+    cloud_topic: /rkbot/lio/body/cloud
+    # 建图的时候,出来的图会有个yaml文件,里面的偏移值是odom相对map的偏移,需要进行转换
     odom_topic: /rkbot/lio/odom
     output_dir: /home/lgl/Documents/trae_projects/autoinitialpose/AutoInitialize/btc_db
     map_frame: rkbot/world
-    save_every_n: 3
+    save_every_n: 1
     sync_queue_size: 20
     is_high_fly: 0
     parallel_stl_enable: 1
